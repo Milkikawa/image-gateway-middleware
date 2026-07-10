@@ -1,0 +1,32 @@
+services:
+  gateway:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${EASYTIER_BIND_IP:-127.0.0.1}:8080:8080"
+      - "${LAN_BIND_IP:-127.0.0.1}:8081:8081"
+    volumes:
+      - ./data:/data
+    networks:
+      - gateway
+      - newapi
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/_gateway/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  gateway:
+    driver: bridge
+  newapi:
+    external: true
+    name: ${NEWAPI_DOCKER_NETWORK:-newapi}

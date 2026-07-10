@@ -1,0 +1,38 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local workspace and editor state
+/.snow/
+/.vscode/
+/.codex/
+/.idea/
+.DS_Store
+Thumbs.db
+
+# Internal design notes (local-only, not tracked)
+/docs/development.md
+
+# Runtime data and persistent state
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.part
+
+# Go build and test artifacts
+/gateway
+*.test
+*.out
+.coverage
+coverage.out
+coverage.html
+*.prof
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*~
