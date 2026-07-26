@@ -56,11 +56,24 @@ NEWAPI_DOCKER_NETWORK=newapi
 
 ### 2. 准备数据目录
 
+默认 Compose 使用仓库下的 `data/`：
+
 ```bash
 mkdir -p data
 sudo chown -R 10001:10001 data
-chmod 750 data
+sudo chmod 750 data
 ```
+
+1Panel 专用 Compose 固定挂载 `/opt/image-gateway-middleware/data`。首次启动前必须显式创建该目录：
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 \
+  /opt/image-gateway-middleware/data
+sudo stat -c 'mode=%a uid=%u gid=%g path=%n' \
+  /opt/image-gateway-middleware/data
+```
+
+预期结果包含 `mode=750 uid=10001 gid=10001`。无需在宿主机创建 UID/GID 10001 对应的用户或用户组。目录缺失时，1Panel Compose 会直接报错，不会自动创建一个所有权错误的目录。
 
 ### 3. 使用默认 Compose 启动
 
@@ -81,13 +94,14 @@ docker compose ps
 
 ### 4. 使用 1Panel Compose 启动
 
-`compose.1panel.yaml` 会让服务直接加入 1Panel 已有的外部网络 `1panel-network`。newapi 已在该网络中时，无需创建或连接其他网络，也无需设置 `NEWAPI_DOCKER_NETWORK`。
+`compose.1panel.yaml` 要求仓库位于 `/opt/image-gateway-middleware`，并将上一节准备好的绝对数据目录挂载到容器 `/data`。服务会直接加入 1Panel 已有的外部网络 `1panel-network`；newapi 已在该网络中时，无需创建或连接其他网络，也无需设置 `NEWAPI_DOCKER_NETWORK`。
 
-可以在 1Panel 的 Compose 项目中选择该文件，或在项目目录执行：
+可以在 1Panel 的 Compose 项目中选择该文件并重新构建、创建，或执行：
 
 ```bash
+cd /opt/image-gateway-middleware
 docker compose -f compose.1panel.yaml config
-docker compose -f compose.1panel.yaml up -d --build
+docker compose -f compose.1panel.yaml up -d --build --force-recreate
 docker compose -f compose.1panel.yaml ps
 ```
 
