@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"image-gateway-middleware/internal/access"
 	"image-gateway-middleware/internal/admin"
 	"image-gateway-middleware/internal/app"
 	"image-gateway-middleware/internal/audit"
@@ -54,15 +55,21 @@ func main() {
 		}
 		return imageProcessor.Preflight(ctx, cfg.MinFreeBytes, cfg.DataDir)
 	})
-	dataHandler := httpdata.NewRouter(proxy, http.HandlerFunc(imageProcessor.ServeImage), httpdata.Health(store.DB))
+	dataHandler := access.AllowClients(
+		httpdata.NewRouter(proxy, http.HandlerFunc(imageProcessor.ServeImage), httpdata.Health(store.DB)),
+		cfg.DataAllowedClients,
+	)
 	auth := admin.NewAuth(store.DB, cfg.CookieSecure)
 	if err = auth.EnsureAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
 		log.Error("initialize administrator", "error", err)
 		os.Exit(1)
 	}
-	adminHandler := admin.NewServer(store.DB, auth, downloader, cfg.PublicImageBase, cfg.DataDir, func(runtime config.Runtime) {
-		downloader.UpdatePolicy(runtime.DownloadAttempts, runtime.RetryBaseDelay, runtime.MaxRedirects)
-	}).Handler()
+	adminHandler := access.AllowClients(
+		admin.NewServer(store.DB, auth, downloader, cfg.PublicImageBase, cfg.DataDir, func(runtime config.Runtime) {
+			downloader.UpdatePolicy(runtime.DownloadAttempts, runtime.RetryBaseDelay, runtime.MaxRedirects)
+		}).Handler(),
+		cfg.AdminAllowedClients,
+	)
 	a := app.App{Config: cfg, Runtime: runtimeCfg, Store: store, Layout: layout, DataHandler: dataHandler, AdminHandler: adminHandler, Log: log}
 	if err = a.Run(ctx); err != nil {
 		log.Error("gateway stopped", "error", err)
