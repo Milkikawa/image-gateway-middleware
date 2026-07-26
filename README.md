@@ -43,12 +43,16 @@ ADMIN_PORT=15881
 PUBLIC_IMAGE_BASE_URL=http://<EASYTIER_IP>:15880/_gateway/images/
 ADMIN_PASSWORD=<至少12字符的强密码>
 
-EASYTIER_BIND_IP=<宿主机的EasyTier地址>
-LAN_BIND_IP=<家庭局域网地址>
+EASYTIER_BIND_IP=0.0.0.0
+LAN_BIND_IP=0.0.0.0
+DATA_ALLOWED_CLIENTS=<数据端口允许的IP或CIDR，逗号分隔>
+ADMIN_ALLOWED_CLIENTS=<管理端口允许的IP或CIDR，逗号分隔>
 NEWAPI_DOCKER_NETWORK=newapi
 ```
 
 `DATA_PORT` 和 `ADMIN_PORT` 同时决定程序监听端口与 Docker 发布端口，可以按需修改；直接运行程序时也会使用这两个端口。修改 `DATA_PORT` 后，请同步更新 `PUBLIC_IMAGE_BASE_URL`。该地址必须能被 Koishi 实际访问。
+
+两个 Compose 默认把端口绑定到所有 IPv4 接口，再由 `DATA_ALLOWED_CLIENTS` 和 `ADMIN_ALLOWED_CLIENTS` 分别限制直接连接的客户端。白名单支持单个 IPv4/IPv6 地址和 CIDR，例如 `192.168.1.21,10.20.30.0/24`；未配置时只允许回环地址。配置非法会导致服务拒绝启动，`X-Forwarded-For` 和 `X-Real-IP` 不参与判断。
 
 ### 2. 准备数据目录
 
@@ -89,20 +93,21 @@ docker compose -f compose.1panel.yaml ps
 
 请确保 `NEWAPI_BASE_URL` 中的主机名是 newapi 在 `1panel-network` 中可解析的容器名或网络别名。
 
-启动后可以访问：
+启动后，白名单内的客户端可以通过宿主机实际可达地址访问：
 
-- 数据 API：`http://<EASYTIER_BIND_IP>:<DATA_PORT>`（默认 `15880`）
-- 管理页面：`http://<LAN_BIND_IP>:<ADMIN_PORT>`（默认 `15881`）
-- 健康检查：`http://<EASYTIER_BIND_IP>:<DATA_PORT>/_gateway/health`
+- 数据 API：`http://<HOST_REACHABLE_IP>:<DATA_PORT>`（默认 `15880`）
+- 管理页面：`http://<HOST_REACHABLE_IP>:<ADMIN_PORT>`（默认 `15881`）
+- 健康检查：`http://<HOST_REACHABLE_IP>:<DATA_PORT>/_gateway/health`
 
 首次启动会使用 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。已有管理员不会因环境变量变化而自动重置密码。
 
 ## 使用提示
 
-- 数据 API 建议只绑定 EasyTier 地址，管理页面只绑定可信的家庭局域网地址。
+- 在 `.env` 中填写实际客户端 IP/CIDR；管理端口通常应使用比数据端口更严格的白名单。
+- 回环网段 `127.0.0.0/8` 和地址 `::1` 始终允许，以保证容器健康检查可用。
 - 图片、请求记录和审计数据默认永久保留，可在管理页面手动删除。
 - 磁盘空间低于配置阈值时，网关会在调用 newapi 之前拒绝新请求。
-- 如果 Koishi 无法获取改写后的图片，请先检查 EasyTier 地址、Docker bridge 出站和 mihomo TUN 路由。
+- 如果 Koishi 无法获取改写后的图片，请先检查客户端白名单、EasyTier 地址、Docker bridge 出站和 mihomo TUN 路由。
 
 ## 更多文档
 
