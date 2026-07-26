@@ -47,8 +47,10 @@ cp .env.example .env
 | `DATA_PORT`             | 数据 API 的监听与 Docker 发布端口    | `15880`                                  |
 | `ADMIN_PORT`            | 管理页面的监听与 Docker 发布端口     | `15881`                                  |
 | `PUBLIC_IMAGE_BASE_URL` | 返回给 Koishi 的图片基础地址         | `http://10.0.0.1:15880/_gateway/images/` |
-| `EASYTIER_BIND_IP`      | 数据端口绑定的宿主机 EasyTier IP     | `10.0.0.1`                               |
-| `LAN_BIND_IP`           | 管理端口绑定的可信 LAN IP            | `192.168.1.10`                           |
+| `EASYTIER_BIND_IP`      | 数据端口绑定的宿主机地址             | `0.0.0.0`                                |
+| `LAN_BIND_IP`           | 管理端口绑定的宿主机地址             | `0.0.0.0`                                |
+| `DATA_ALLOWED_CLIENTS`  | 数据端口允许的客户端 IP/CIDR 列表    | `192.168.1.21,10.20.30.0/24`             |
+| `ADMIN_ALLOWED_CLIENTS` | 管理端口允许的客户端 IP/CIDR 列表    | `192.168.1.21,10.20.30.40`               |
 | `NEWAPI_DOCKER_NETWORK` | 与 newapi 共用的外部 Docker 网络     | `newapi`                                 |
 | `ADMIN_USERNAME`        | 首次创建的管理员用户名               | `admin`                                  |
 | `ADMIN_PASSWORD`        | 首次创建的管理员密码，至少 12 字符   | 使用强密码                               |
@@ -57,7 +59,9 @@ cp .env.example .env
 
 `DATA_PORT` 与 `ADMIN_PORT` 也适用于直接运行程序的场景。修改 `DATA_PORT` 后，必须同步修改 `PUBLIC_IMAGE_BASE_URL`；该地址应以 `/_gateway/images/` 结尾，而且必须能从 Koishi 所在网络访问。
 
-不要把数据端口和管理端口无意绑定到公网地址。Compose 的默认回退绑定是 `127.0.0.1`。
+Compose 默认将两个端口绑定到所有 IPv4 接口。`DATA_ALLOWED_CLIENTS` 和 `ADMIN_ALLOWED_CLIENTS` 使用逗号分隔，支持单个 IPv4/IPv6 地址与 CIDR。未配置白名单时只允许 `127.0.0.0/8` 和 `::1`；这两个回环范围始终允许，以保证容器健康检查可用。任何无效或空的列表项都会让服务拒绝启动。
+
+白名单只检查直接 TCP 对端 `RemoteAddr`，不会读取 `X-Forwarded-For` 或 `X-Real-IP`。它在 HTTP 层返回 `403 Forbidden`，不代替宿主机防火墙。不要将端口绑定到公网可达接口，除非部署环境另有可靠的网络层保护。
 
 ## 创建共享网络
 
@@ -111,19 +115,19 @@ docker compose -f compose.1panel.yaml up -d --build
 
 newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。
 
-健康检查：
+健康检查（从白名单内的客户端执行，并将地址替换为宿主机实际可达 IP）：
 
 ```bash
-curl -fsS "http://${EASYTIER_BIND_IP}:${DATA_PORT}/_gateway/health"
+curl -fsS "http://<HOST_REACHABLE_IP>:${DATA_PORT}/_gateway/health"
 ```
 
 管理页面：
 
 ```text
-http://<LAN_BIND_IP>:<ADMIN_PORT>/
+http://<HOST_REACHABLE_IP>:<ADMIN_PORT>/
 ```
 
-首次启动时，数据库中没有管理员才会使用环境变量创建管理员。修改 `.env` 不会重置已有管理员密码。
+首次启动时，数据库中没有管理员才会使用环境变量创建管理员。修改 `.env` 不会重置已有管理员密码。修改任一白名单后需要重启容器。
 
 ## mihomo、Fake-IP 与 Docker bridge 验收
 
@@ -208,7 +212,8 @@ sudo chown -R 10001:10001 data
 按顺序检查：
 
 - `PUBLIC_IMAGE_BASE_URL` 是否填写 EasyTier 可达地址。
-- 数据端口是否绑定正确的 `EASYTIER_BIND_IP`。
+- 数据端口是否绑定到包含 EasyTier 地址的宿主机接口；默认 `0.0.0.0` 覆盖所有 IPv4 接口。
+- Koishi 的直接来源 IP 是否命中 `DATA_ALLOWED_CLIENTS`；不命中时服务返回 `403`。
 - Home-Cloud 防火墙是否允许 EasyTier 网卡访问 `DATA_PORT`（默认 `15880`）。
 - Koishi 所在机器能否直接请求健康检查。
 - 返回的图片 ID 是否能在管理页面找到。
