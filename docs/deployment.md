@@ -41,19 +41,21 @@ cp .env.example .env
 
 主要配置：
 
-| 变量                    | 作用                                 | 示例                                    |
-| ----------------------- | ------------------------------------ | --------------------------------------- |
-| `NEWAPI_BASE_URL`       | Docker 网络中的固定 newapi 地址      | `http://newapi:3000`                    |
-| `PUBLIC_IMAGE_BASE_URL` | 返回给 Koishi 的图片基础地址         | `http://10.0.0.1:8080/_gateway/images/` |
-| `EASYTIER_BIND_IP`      | 数据端口绑定的宿主机 EasyTier IP     | `10.0.0.1`                              |
-| `LAN_BIND_IP`           | 管理端口绑定的可信 LAN IP            | `192.168.1.10`                          |
-| `NEWAPI_DOCKER_NETWORK` | 与 newapi 共用的外部 Docker 网络     | `newapi`                                |
-| `ADMIN_USERNAME`        | 首次创建的管理员用户名               | `admin`                                 |
-| `ADMIN_PASSWORD`        | 首次创建的管理员密码，至少 12 字符   | 使用强密码                              |
-| `COOKIE_SECURE`         | 管理页面是否只通过 HTTPS 发送 Cookie | HTTP 用 `false`，HTTPS 用 `true`        |
-| `MIN_FREE_BYTES`        | 调用 newapi 前要求的最小可用空间     | 默认 2 GiB                              |
+| 变量                    | 作用                                 | 示例                                     |
+| ----------------------- | ------------------------------------ | ---------------------------------------- |
+| `NEWAPI_BASE_URL`       | Docker 网络中的固定 newapi 地址      | `http://newapi:3000`                     |
+| `DATA_PORT`             | 数据 API 的监听与 Docker 发布端口    | `15880`                                  |
+| `ADMIN_PORT`            | 管理页面的监听与 Docker 发布端口     | `15881`                                  |
+| `PUBLIC_IMAGE_BASE_URL` | 返回给 Koishi 的图片基础地址         | `http://10.0.0.1:15880/_gateway/images/` |
+| `EASYTIER_BIND_IP`      | 数据端口绑定的宿主机 EasyTier IP     | `10.0.0.1`                               |
+| `LAN_BIND_IP`           | 管理端口绑定的可信 LAN IP            | `192.168.1.10`                           |
+| `NEWAPI_DOCKER_NETWORK` | 与 newapi 共用的外部 Docker 网络     | `newapi`                                 |
+| `ADMIN_USERNAME`        | 首次创建的管理员用户名               | `admin`                                  |
+| `ADMIN_PASSWORD`        | 首次创建的管理员密码，至少 12 字符   | 使用强密码                               |
+| `COOKIE_SECURE`         | 管理页面是否只通过 HTTPS 发送 Cookie | HTTP 用 `false`，HTTPS 用 `true`         |
+| `MIN_FREE_BYTES`        | 调用 newapi 前要求的最小可用空间     | 默认 2 GiB                               |
 
-`PUBLIC_IMAGE_BASE_URL` 必须以 `/_gateway/images/` 结尾，而且必须能从 Koishi 所在网络访问。
+`DATA_PORT` 与 `ADMIN_PORT` 也适用于直接运行程序的场景。修改 `DATA_PORT` 后，必须同步修改 `PUBLIC_IMAGE_BASE_URL`；该地址应以 `/_gateway/images/` 结尾，而且必须能从 Koishi 所在网络访问。
 
 不要把数据端口和管理端口无意绑定到公网地址。Compose 的默认回退绑定是 `127.0.0.1`。
 
@@ -97,19 +99,28 @@ docker compose config
 docker compose build
 docker compose up -d
 docker compose ps
-docker compose logs --no-color gateway
+docker compose logs --no-color image-gateway
 ```
+
+1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置：
+
+```bash
+docker compose -f compose.1panel.yaml config
+docker compose -f compose.1panel.yaml up -d --build
+```
+
+newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。
 
 健康检查：
 
 ```bash
-curl -fsS "http://${EASYTIER_BIND_IP}:8080/_gateway/health"
+curl -fsS "http://${EASYTIER_BIND_IP}:${DATA_PORT}/_gateway/health"
 ```
 
 管理页面：
 
 ```text
-http://<LAN_BIND_IP>:8081/
+http://<LAN_BIND_IP>:<ADMIN_PORT>/
 ```
 
 首次启动时，数据库中没有管理员才会使用环境变量创建管理员。修改 `.env` 不会重置已有管理员密码。
@@ -119,7 +130,7 @@ http://<LAN_BIND_IP>:8081/
 从最终容器中测试真实图片域名：
 
 ```bash
-docker compose exec gateway wget -S -O /dev/null https://<真实图片域名>/
+docker compose exec image-gateway wget -S -O /dev/null https://<真实图片域名>/
 ```
 
 建议依次确认：
@@ -149,9 +160,9 @@ SQLite 使用 WAL。服务运行时只复制 `gateway.db` 可能漏掉已经提�
 最简单的方式是停机备份数据库和图片目录：
 
 ```bash
-docker compose stop gateway
+docker compose stop image-gateway
 tar -C data -czf "image-gateway-backup-$(date +%F-%H%M%S).tar.gz" database images
-docker compose start gateway
+docker compose start image-gateway
 ```
 
 如果不能停机，应使用与 SQLite 兼容的在线备份工具生成一致性数据库副本，再备份图片目录。数据库和图片目录应作为同一个备份集保存。
@@ -165,13 +176,13 @@ docker compose start gateway
 5. 启动并检查健康状态、日志、请求记录和图片抽样。
 
 ```bash
-docker compose stop gateway
+docker compose stop image-gateway
 mv data "data.failed.$(date +%s)"
 mkdir data
 tar -C data -xzf <backup.tar.gz>
 sudo chown -R 10001:10001 data
 docker compose up -d
-docker compose logs --no-color gateway
+docker compose logs --no-color image-gateway
 ```
 
 当前版本会清理遗留 `.part`，但不会自动扫描所有孤儿最终文件，也不会自动修复数据库中 READY 但文件缺失的记录。崩溃恢复后建议抽样核对管理页面和 `data/images/`。
@@ -198,7 +209,7 @@ sudo chown -R 10001:10001 data
 
 - `PUBLIC_IMAGE_BASE_URL` 是否填写 EasyTier 可达地址。
 - 数据端口是否绑定正确的 `EASYTIER_BIND_IP`。
-- Home-Cloud 防火墙是否允许 EasyTier 网卡访问 8080。
+- Home-Cloud 防火墙是否允许 EasyTier 网卡访问 `DATA_PORT`（默认 `15880`）。
 - Koishi 所在机器能否直接请求健康检查。
 - 返回的图片 ID 是否能在管理页面找到。
 
