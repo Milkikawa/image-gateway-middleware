@@ -79,11 +79,15 @@ docker network connect newapi <newapi-container-name>
 
 ## 准备数据目录
 
+默认的 `compose.yaml` 把宿主机 `./data` 绑定到容器 `/data`，启动前需要执行：
+
 ```bash
 mkdir -p data
 sudo chown -R 10001:10001 data
 chmod 750 data
 ```
+
+`compose.1panel.yaml` 改用 Docker 命名卷 `image-gateway-data`，无需创建宿主机 `data` 目录，也无需手动 `chown`。全新空卷首次挂载时，Docker 会从镜像中的 `/data` 预置归 UID/GID `10001:10001` 所有的数据子目录，避免 1Panel 自动创建的 bind mount 目录归 `root` 所有。已有非空卷不会因重建镜像自动修复权限。
 
 服务会在 `/data` 下创建：
 
@@ -94,7 +98,7 @@ tmp/       下载中的 .part 文件
 trash/     预留的恢复/删除目录
 ```
 
-容器根文件系统只读，业务数据只写入 `/data`。如果看到 permission denied，优先检查宿主目录所有权是否为 `10001:10001`。
+容器根文件系统只读，业务数据只写入 `/data`。默认 Compose 如果出现 `permission denied`，优先检查宿主目录所有权是否为 `10001:10001`；1Panel Compose 则检查是否仍在使用旧的 `./data:/data` 配置。
 
 ## 启动与检查
 
@@ -106,14 +110,24 @@ docker compose ps
 docker compose logs --no-color image-gateway
 ```
 
-1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置：
+1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置。优先在 1Panel 的 Compose 项目页面执行更新；如需使用 CLI，先从 1Panel 页面取得准确的项目名，所有命令都显式传入 `-p`：
 
 ```bash
-docker compose -f compose.1panel.yaml config
-docker compose -f compose.1panel.yaml up -d --build
+export PROJECT='替换为1Panel中的Compose项目名'
+docker compose -p "$PROJECT" -f compose.1panel.yaml config
+docker compose -p "$PROJECT" -f compose.1panel.yaml ps -a
+docker compose -p "$PROJECT" -f compose.1panel.yaml up -d --build
 ```
 
-newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。
+也可以从旧容器标签核对 1Panel 使用的项目名、工作目录和配置文件；如果列出多个候选，请先人工确认目标容器：
+
+```bash
+docker ps -a --filter label=com.docker.compose.service=image-gateway --format 'name={{.Names}} project={{.Label "com.docker.compose.project"}} workdir={{.Label "com.docker.compose.project.working_dir"}} config={{.Label "com.docker.compose.project.config_files"}} status={{.Status}}'
+```
+
+newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。首次启动会自动创建项目专属的 `image-gateway-data` 逻辑卷；Docker 中的实际卷名通常带 Compose 项目前缀。后续重建容器不会删除该卷。不要执行 `docker compose down -v`，在 1Panel 删除项目时也不要选择删除数据卷，否则会删除数据库和图片。
+
+执行 `run`、`stop`、`start`、`up` 或备份前，必须确认 `docker compose -p "$PROJECT" -f compose.1panel.yaml ps -a` 显示的是现有生产容器；如果为空或名称不符，应立即停止，避免创建另一套项目和空数据卷。
 
 健康检查（从白名单内的客户端执行，并将地址替换为宿主机实际可达 IP）：
 
@@ -159,37 +173,30 @@ docker compose exec image-gateway wget -S -O /dev/null https://<真实图片域�
 
 ## 备份
 
-SQLite 使用 WAL。服务运行时只复制 `gateway.db` 可能漏掉已经提交但尚未 checkpoint 的数据。
+SQLite 使用 WAL。服务运行时只复制 `gateway.db` 可能漏掉已经提交但尚未 checkpoint 的数据；数据库和图片目录应作为同一个备份集保存。
 
-最简单的方式是停机备份数据库和图片目录：
+- 默认 Compose：先记录服务是否正在运行，再停止网关，将宿主机 `data/database` 和 `data/images` 一起归档到项目目录之外。使用不会覆盖旧文件的唯一文件名，执行 `tar -tzf` 并确认包含 `database/gateway.db` 后，才将其标记为有效备份。仅当服务备份前处于运行状态时才重新启动。
+- 1Panel Compose：先用运行容器的 `docker inspect` 核实 `/data` 对应的实际命名卷，再停止网关，通过 1Panel 的卷备份功能或经过演练的命名卷备份工具导出 `database` 和 `images`。备份完成后同样检查归档，且只恢复服务原本的运行状态。
+- 不要并发执行备份，不要覆盖已有归档；失败产生的临时文件不得作为可恢复备份。
+- 如果不能停机，应使用与 SQLite 兼容的在线备份工具生成一致性数据库副本，再备份图片目录。
 
-```bash
-docker compose stop image-gateway
-tar -C data -czf "image-gateway-backup-$(date +%F-%H%M%S).tar.gz" database images
-docker compose start image-gateway
-```
+## 从旧 1Panel bind mount 迁移
 
-如果不能停机，应使用与 SQLite 兼容的在线备份工具生成一致性数据库副本，再备份图片目录。数据库和图片目录应作为同一个备份集保存。
+从旧版 `./data:/data` 切换到命名卷时，Docker 不会自动迁移旧目录。升级前先停止旧服务并检查 `./data/database/gateway.db`、`./data/images`；有数据时使用上一节相同原则生成且验证备份，原 `./data` 在迁移验收完成前必须保持不变。不要让旧目录和新卷同时接受业务写入，否则会形成两套分叉数据。
+
+把已验证的备份恢复到一个独立的候选卷或测试项目，确认管理员、请求记录、图片抽样和健康检查都正常后，再让生产 Compose 指向候选卷。不要先清空当前生产卷再尝试解压。
 
 ## 恢复
 
-1. 停止网关。
-2. 保留当前 `data/` 作为故障现场副本。
-3. 恢复同一备份集中的数据库和图片。
-4. 修正目录所有权。
-5. 启动并检查健康状态、日志、请求记录和图片抽样。
+恢复属于破坏性维护，必须先满足以下条件：
 
-```bash
-docker compose stop image-gateway
-mv data "data.failed.$(date +%s)"
-mkdir data
-tar -C data -xzf <backup.tar.gz>
-sudo chown -R 10001:10001 data
-docker compose up -d
-docker compose logs --no-color image-gateway
-```
+1. `tar -tzf "$BACKUP"` 成功，并确认包含 `database/gateway.db` 和预期图片。
+2. 已将当前生产数据导出为另一份故障现场备份，并验证该归档。
+3. 已通过运行容器的 `docker inspect` 核实 `/data` 的实际卷名，避免因 Compose project name 不一致操作到错误卷。
+4. 先恢复到新的候选目录或候选卷；候选数据通过启动、健康检查和图片抽样后再切换。
+5. 任一步失败都保持原生产数据和原卷不变，不启动空数据库。
 
-当前版本会清理遗留 `.part`，但不会自动扫描所有孤儿最终文件，也不会自动修复数据库中 READY 但文件缺失的记录。崩溃恢复后建议抽样核对管理页面和 `data/images/`。
+当前版本会清理遗留 `.part`，但不会自动扫描所有孤儿最终文件，也不会自动修复数据库中 READY 但文件缺失的记录。崩溃恢复后建议抽样核对管理页面及对应数据卷中的图片。
 
 ## 删除行为
 
@@ -201,10 +208,42 @@ docker compose logs --no-color image-gateway
 
 ### 容器无法写入 `/data`
 
-确认宿主目录所有权：
+默认 Compose 使用 bind mount，确认宿主目录所有权：
 
 ```bash
 sudo chown -R 10001:10001 data
+```
+
+1Panel Compose 应使用 `image-gateway-data:/data` 命名卷。如果仍然报错，请先设置正确的 `PROJECT`，再用 `docker compose -p "$PROJECT" -f compose.1panel.yaml config` 确认最终配置中没有旧的 `./data:/data`。所有命令必须复用 1Panel 的 Compose project name；以下检查会断言容器身份、目录所有者以及每个业务目录的实际写入能力：
+
+```bash
+export PROJECT='替换为1Panel中的Compose项目名'
+docker compose -p "$PROJECT" -f compose.1panel.yaml run --rm --no-deps --entrypoint sh image-gateway -c '
+set -eu
+probe=""
+cleanup() { [ -z "$probe" ] || rm -f "$probe"; }
+trap cleanup EXIT INT TERM
+[ "$(id -u)" = 10001 ]
+[ "$(id -g)" = 10001 ]
+for dir in /data /data/database /data/images /data/tmp /data/trash; do
+  [ "$(stat -c "%u:%g" "$dir")" = "10001:10001" ]
+  probe="$dir/.write-test-$$"
+  : > "$probe"
+  rm "$probe"
+  probe=""
+done
+id
+ls -ldn /data /data/database /data/images /data/tmp /data/trash
+'
+```
+
+服务启动后再检查生产容器的 `/data` 挂载必须是 `type=volume` 且 `rw=true`；`source` 是带项目名前缀的实际卷名：
+
+```bash
+CID="$(docker compose -p "$PROJECT" -f compose.1panel.yaml ps -q image-gateway)"
+test -n "$CID"
+test "$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$CID")" = "$PROJECT"
+docker inspect --format '{{range .Mounts}}{{if eq .Destination "/data"}}type={{.Type}} source={{.Name}} rw={{.RW}}{{end}}{{end}}' "$CID"
 ```
 
 ### Koishi 收到了 URL，但无法下载图片

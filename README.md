@@ -54,13 +54,17 @@ NEWAPI_DOCKER_NETWORK=newapi
 
 两个 Compose 默认把端口绑定到所有 IPv4 接口，再由 `DATA_ALLOWED_CLIENTS` 和 `ADMIN_ALLOWED_CLIENTS` 分别限制直接连接的客户端。白名单支持单个 IPv4/IPv6 地址和 CIDR，例如 `192.168.1.21,10.20.30.0/24`；未配置时只允许回环地址。配置非法会导致服务拒绝启动，`X-Forwarded-For` 和 `X-Real-IP` 不参与判断。
 
-### 2. 准备数据目录
+### 2. 准备默认 Compose 的数据目录
+
+默认的 `compose.yaml` 使用宿主机目录 `./data`，启动前需要执行：
 
 ```bash
 mkdir -p data
 sudo chown -R 10001:10001 data
 chmod 750 data
 ```
+
+1Panel 专用配置使用 Docker 命名卷，不需要在项目目录创建或修改 `data` 的权限。
 
 ### 3. 使用默认 Compose 启动
 
@@ -81,14 +85,17 @@ docker compose ps
 
 ### 4. 使用 1Panel Compose 启动
 
-`compose.1panel.yaml` 会让服务直接加入 1Panel 已有的外部网络 `1panel-network`。newapi 已在该网络中时，无需创建或连接其他网络，也无需设置 `NEWAPI_DOCKER_NETWORK`。
+`compose.1panel.yaml` 会让服务直接加入 1Panel 已有的外部网络 `1panel-network`，并使用 Docker 命名卷 `image-gateway-data` 持久化 `/data`。全新空卷首次挂载时会继承镜像中归 UID/GID `10001:10001` 所有的数据目录，从而避免 1Panel 自动创建的宿主机目录归 `root` 所有而无法写入。newapi 已在该网络中时，无需创建或连接其他网络，也无需设置 `NEWAPI_DOCKER_NETWORK`。
 
-可以在 1Panel 的 Compose 项目中选择该文件，或在项目目录执行：
+如果旧版 `./data/database/gateway.db` 或 `./data/images` 已有数据，不要直接切换后继续使用；命名卷不会自动迁移旧 bind mount 数据。请先停止旧服务、备份并按 [部署文档](docs/deployment.md) 完成迁移，验证前保留原 `./data`。
+
+可以在 1Panel 的 Compose 项目中选择该文件。若改用项目目录中的 CLI，必须显式填写与 1Panel 完全相同的 Compose 项目名，避免创建另一套容器和数据卷：
 
 ```bash
-docker compose -f compose.1panel.yaml config
-docker compose -f compose.1panel.yaml up -d --build
-docker compose -f compose.1panel.yaml ps
+export PROJECT='替换为1Panel中的Compose项目名'
+docker compose -p "$PROJECT" -f compose.1panel.yaml config
+docker compose -p "$PROJECT" -f compose.1panel.yaml up -d --build
+docker compose -p "$PROJECT" -f compose.1panel.yaml ps
 ```
 
 请确保 `NEWAPI_BASE_URL` 中的主机名是 newapi 在 `1panel-network` 中可解析的容器名或网络别名。

@@ -1,0 +1,30 @@
+# Version control and local tooling
+.git
+.snow
+.vscode
+.idea
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime data and backups
+data
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.part
+image-gateway-backup-*.tar.gz
+
+# Local build and test artifacts
+gateway
+*.test
+*.out
+coverage.out
+coverage.html
+*.prof
+*.log
+*.tmp
+*.temp
