@@ -33,17 +33,25 @@ type Bootstrap struct {
 func LoadBootstrap() (Bootstrap, error) {
 	var c Bootstrap
 	var err error
+	dataPort, err := envPort("DATA_PORT", 15880)
+	if err != nil {
+		return c, err
+	}
+	adminPort, err := envPort("ADMIN_PORT", 15881)
+	if err != nil {
+		return c, err
+	}
+	if dataPort == adminPort {
+		return c, errors.New("DATA_PORT and ADMIN_PORT must differ")
+	}
 	if c.NewAPIBaseURL, err = parseHTTPURL(env("NEWAPI_BASE_URL", "http://newapi:3000"), "NEWAPI_BASE_URL"); err != nil {
 		return c, err
 	}
-	if c.PublicImageBase, err = parseHTTPURL(env("PUBLIC_IMAGE_BASE_URL", "http://10.0.0.1:8080/_gateway/images/"), "PUBLIC_IMAGE_BASE_URL"); err != nil {
+	if c.PublicImageBase, err = parseHTTPURL(env("PUBLIC_IMAGE_BASE_URL", "http://10.0.0.1:"+dataPort+"/_gateway/images/"), "PUBLIC_IMAGE_BASE_URL"); err != nil {
 		return c, err
 	}
-	c.DataListenAddr = env("DATA_LISTEN_ADDR", ":8080")
-	c.AdminListenAddr = env("ADMIN_LISTEN_ADDR", ":8081")
-	if c.DataListenAddr == c.AdminListenAddr {
-		return c, errors.New("DATA_LISTEN_ADDR and ADMIN_LISTEN_ADDR must differ")
-	}
+	c.DataListenAddr = ":" + dataPort
+	c.AdminListenAddr = ":" + adminPort
 	c.DataDir = filepath.Clean(env("DATA_DIR", "/data"))
 	if !filepath.IsAbs(c.DataDir) {
 		return c, errors.New("DATA_DIR must be absolute")
@@ -107,6 +115,15 @@ func envInt64(key string, fallback, min int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be an integer >= %d", key, min)
 	}
 	return n, nil
+}
+
+func envPort(key string, fallback int) (string, error) {
+	raw := env(key, strconv.Itoa(fallback))
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("%s must be an integer between 1 and 65535", key)
+	}
+	return strconv.Itoa(port), nil
 }
 func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(env(key, fallback.String()))

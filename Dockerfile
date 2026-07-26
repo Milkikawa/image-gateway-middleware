@@ -10,5 +10,5 @@ RUN addgroup -S -g 10001 gateway && adduser -S -D -H -u 10001 -G gateway gateway
 COPY --from=build /out/gateway /usr/local/bin/gateway
 USER gateway
 VOLUME ["/data"]
-EXPOSE 8080 8081
+EXPOSE 15880 15881
 ENTRYPOINT ["/usr/local/bin/gateway"]

@@ -38,7 +38,9 @@ cp .env.example .env
 
 ```dotenv
 NEWAPI_BASE_URL=http://newapi:3000
-PUBLIC_IMAGE_BASE_URL=http://<EASYTIER_IP>:8080/_gateway/images/
+DATA_PORT=15880
+ADMIN_PORT=15881
+PUBLIC_IMAGE_BASE_URL=http://<EASYTIER_IP>:15880/_gateway/images/
 ADMIN_PASSWORD=<至少12字符的强密码>
 
 EASYTIER_BIND_IP=<宿主机的EasyTier地址>
@@ -46,22 +48,26 @@ LAN_BIND_IP=<家庭局域网地址>
 NEWAPI_DOCKER_NETWORK=newapi
 ```
 
-`PUBLIC_IMAGE_BASE_URL` 必须是 Koishi 实际能够访问的地址。
+`DATA_PORT` 和 `ADMIN_PORT` 同时决定程序监听端口与 Docker 发布端口，可以按需修改；直接运行程序时也会使用这两个端口。修改 `DATA_PORT` 后，请同步更新 `PUBLIC_IMAGE_BASE_URL`。该地址必须能被 Koishi 实际访问。
 
-### 2. 准备 Docker 网络和数据目录
+### 2. 准备数据目录
 
 ```bash
-docker network create newapi
-docker network connect newapi <newapi-container-name>
-
 mkdir -p data
 sudo chown -R 10001:10001 data
 chmod 750 data
 ```
 
-如果共享网络不是 `newapi`，请同时修改 `NEWAPI_DOCKER_NETWORK`。
+### 3. 使用默认 Compose 启动
 
-### 3. 启动
+默认 Compose 不创建项目专用网络，只连接 newapi 所在的外部网络。首次部署时准备网络：
+
+```bash
+docker network create newapi
+docker network connect newapi <newapi-container-name>
+```
+
+如果共享网络不是 `newapi`，请修改 `.env` 中的 `NEWAPI_DOCKER_NETWORK`。
 
 ```bash
 docker compose config
@@ -69,11 +75,25 @@ docker compose up -d --build
 docker compose ps
 ```
 
+### 4. 使用 1Panel Compose 启动
+
+`compose.1panel.yaml` 会让服务直接加入 1Panel 已有的外部网络 `1panel-network`。newapi 已在该网络中时，无需创建或连接其他网络，也无需设置 `NEWAPI_DOCKER_NETWORK`。
+
+可以在 1Panel 的 Compose 项目中选择该文件，或在项目目录执行：
+
+```bash
+docker compose -f compose.1panel.yaml config
+docker compose -f compose.1panel.yaml up -d --build
+docker compose -f compose.1panel.yaml ps
+```
+
+请确保 `NEWAPI_BASE_URL` 中的主机名是 newapi 在 `1panel-network` 中可解析的容器名或网络别名。
+
 启动后可以访问：
 
-- 数据 API：`http://<EASYTIER_BIND_IP>:8080`
-- 管理页面：`http://<LAN_BIND_IP>:8081`
-- 健康检查：`http://<EASYTIER_BIND_IP>:8080/_gateway/health`
+- 数据 API：`http://<EASYTIER_BIND_IP>:<DATA_PORT>`（默认 `15880`）
+- 管理页面：`http://<LAN_BIND_IP>:<ADMIN_PORT>`（默认 `15881`）
+- 健康检查：`http://<EASYTIER_BIND_IP>:<DATA_PORT>/_gateway/health`
 
 首次启动会使用 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。已有管理员不会因环境变量变化而自动重置密码。
 

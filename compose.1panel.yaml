@@ -9,7 +9,7 @@ services:
     volumes:
       - ./data:/data
     networks:
-      - newapi
+      - 1panel-network
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -18,20 +18,11 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
     healthcheck:
-      test:
-        [
-          "CMD",
-          "wget",
-          "-q",
-          "-O",
-          "/dev/null",
-          "http://127.0.0.1:${DATA_PORT:-15880}/_gateway/health",
-        ]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${DATA_PORT:-15880}/_gateway/health"]
       interval: 30s
       timeout: 5s
       retries: 3
 
 networks:
-  newapi:
+  1panel-network:
     external: true
-    name: ${NEWAPI_DOCKER_NETWORK:-newapi}
