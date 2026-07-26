@@ -1,0 +1,28 @@
+services:
+  image-gateway:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${EASYTIER_BIND_IP:-127.0.0.1}:${DATA_PORT:-15880}:${DATA_PORT:-15880}"
+      - "${LAN_BIND_IP:-127.0.0.1}:${ADMIN_PORT:-15881}:${ADMIN_PORT:-15881}"
+    volumes:
+      - ./data:/data
+    networks:
+      - 1panel-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${DATA_PORT:-15880}/_gateway/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  1panel-network:
+    external: true
