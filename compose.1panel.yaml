@@ -2,6 +2,12 @@ services:
   image-gateway:
     build: .
     restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+        compress: "true"
     env_file: .env
     ports:
       - "${EASYTIER_BIND_IP:-0.0.0.0}:${DATA_PORT:-15880}:${DATA_PORT:-15880}"
