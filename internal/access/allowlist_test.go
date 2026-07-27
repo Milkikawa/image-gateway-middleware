@@ -1,10 +1,15 @@
 package access
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
+
+	"image-gateway-middleware/internal/observability"
 )
 
 func TestAllowClients(t *testing.T) {
@@ -69,5 +74,38 @@ func TestAllowClientsIgnoresForwardedHeaders(t *testing.T) {
 
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestAllowClientsLogsSafeRejectionDetails(t *testing.T) {
+	var output bytes.Buffer
+	logger := observability.NewLogger(&output, slog.LevelInfo)
+	allowed := []netip.Prefix{netip.MustParsePrefix("192.168.1.21/32")}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models?token=query-secret", nil)
+	req.RemoteAddr = "[::ffff:203.0.113.10]:1234"
+	req.Header.Set("Authorization", "Bearer authorization-secret")
+	req.Header.Set("X-Forwarded-For", "forwarded-secret")
+	recorder := httptest.NewRecorder()
+
+	AllowClients(http.NotFoundHandler(), allowed, WithAllowlistLogger(logger, "data")).ServeHTTP(recorder, req)
+
+	logOutput := output.String()
+	for _, expected := range []string{`"component":"allowlist"`, `"plane":"data"`, `"reason":"not_allowed"`, `"peer_ip":"203.0.113.10"`, `"path":"/v1/models"`} {
+		if !strings.Contains(logOutput, expected) {
+			t.Errorf("log missing %s: %s", expected, logOutput)
+		}
+	}
+	for _, secret := range []string{"query-secret", "authorization-secret", "forwarded-secret", "192.168.1.21/32"} {
+		if strings.Contains(logOutput, secret) {
+			t.Errorf("log leaked %q: %s", secret, logOutput)
+		}
+	}
+
+	output.Reset()
+	req = httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.RemoteAddr = "invalid-remote"
+	AllowClients(http.NotFoundHandler(), allowed, WithAllowlistLogger(logger, "admin")).ServeHTTP(httptest.NewRecorder(), req)
+	if !strings.Contains(output.String(), `"reason":"invalid_remote_addr"`) {
+		t.Fatalf("invalid remote address reason missing: %s", output.String())
 	}
 }
