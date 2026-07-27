@@ -79,11 +79,26 @@ docker network connect newapi <newapi-container-name>
 
 ## 准备数据目录
 
+通用 Compose 使用仓库下的 `data/`：
+
 ```bash
 mkdir -p data
 sudo chown -R 10001:10001 data
-chmod 750 data
+sudo chmod 750 data
 ```
+
+1Panel 专用 Compose 固定挂载宿主机绝对路径 `/opt/image-gateway-middleware/data`。首次启动前必须显式创建该目录：
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 \
+  /opt/image-gateway-middleware/data
+sudo stat -c 'mode=%a uid=%u gid=%g path=%n' \
+  /opt/image-gateway-middleware/data
+```
+
+预期检查结果包含 `mode=750 uid=10001 gid=10001`。无需在宿主机创建 UID/GID 10001 对应的用户或用户组；容器镜像内的 `gateway` 用户已经使用该数字身份。
+
+`compose.1panel.yaml` 设置了 `create_host_path: false`，因此目录缺失时 Compose 会直接报错，而不会自动创建一个无法由非 root 容器写入的 `root:root` 目录。
 
 服务会在 `/data` 下创建：
 
@@ -94,7 +109,7 @@ tmp/       下载中的 .part 文件
 trash/     预留的恢复/删除目录
 ```
 
-容器根文件系统只读，业务数据只写入 `/data`。如果看到 permission denied，优先检查宿主目录所有权是否为 `10001:10001`。
+容器根文件系统只读，业务数据只写入 `/data`。如果看到 permission denied，优先检查实际挂载的宿主目录所有权是否为 `10001:10001`。
 
 ## 启动与检查
 
@@ -106,14 +121,15 @@ docker compose ps
 docker compose logs --no-color image-gateway
 ```
 
-1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置：
+1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置。仓库必须位于 `/opt/image-gateway-middleware`，并先按上一节创建绝对数据目录：
 
 ```bash
+cd /opt/image-gateway-middleware
 docker compose -f compose.1panel.yaml config
-docker compose -f compose.1panel.yaml up -d --build
+docker compose -f compose.1panel.yaml up -d --build --force-recreate
 ```
 
-newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。
+如果编排由 1Panel 管理，优先在 1Panel 中重新构建和创建，以继续使用原有 Compose 项目名。newapi 已在 `1panel-network` 时无需处理其他 Docker 网络。
 
 健康检查（从白名单内的客户端执行，并将地址替换为宿主机实际可达 IP）：
 
@@ -201,11 +217,22 @@ docker compose logs --no-color image-gateway
 
 ### 容器无法写入 `/data`
 
-确认宿主目录所有权：
+先检查容器实际挂载源，再修正该宿主目录的数字所有权：
 
 ```bash
-sudo chown -R 10001:10001 data
+docker inspect <container> \
+  --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}'
+sudo chown -R 10001:10001 <上一步输出的实际路径>
 ```
+
+1Panel 专用配置的预期挂载源是 `/opt/image-gateway-middleware/data`。如果该目录不存在，重新执行：
+
+```bash
+sudo install -d -o 10001 -g 10001 -m 0750 \
+  /opt/image-gateway-middleware/data
+```
+
+不要通过 `user: "0:0"`、`chmod 777` 或 `privileged: true` 绕过目录权限。
 
 ### Koishi 收到了 URL，但无法下载图片
 

@@ -7,7 +7,11 @@ services:
       - "${EASYTIER_BIND_IP:-0.0.0.0}:${DATA_PORT:-15880}:${DATA_PORT:-15880}"
       - "${LAN_BIND_IP:-0.0.0.0}:${ADMIN_PORT:-15881}:${ADMIN_PORT:-15881}"
     volumes:
-      - ./data:/data
+      - type: bind
+        source: /opt/image-gateway-middleware/data
+        target: /data
+        bind:
+          create_host_path: false
     networks:
       - 1panel-network
     security_opt:
