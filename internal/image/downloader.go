@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ type downloadPolicy struct {
 	attempts     int
 	retryDelay   time.Duration
 	maxRedirects int
+	logger       *slog.Logger
 }
 
 type Downloader struct {
@@ -71,6 +73,13 @@ func (d *Downloader) SetURLValidator(validate func(*url.URL) error) {
 	d.policy.validate = validate
 }
 
+// SetLogger enables structured download diagnostics. A nil logger disables them.
+func (d *Downloader) SetLogger(logger *slog.Logger) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.policy.logger = logger
+}
+
 // UpdatePolicy atomically changes the policy for downloads that start afterwards.
 // A running download keeps the snapshot captured at its start.
 func (d *Downloader) UpdatePolicy(attempts int, retryDelay time.Duration, maxRedirects int) {
@@ -91,9 +100,12 @@ func (d *Downloader) Download(ctx context.Context, raw string) Result {
 	policy := d.snapshot()
 	u, err := url.Parse(raw)
 	if err != nil {
+		logDownload(policy.logger, slog.LevelWarn, "", "", 0, 0, false, "invalid_url", 0)
 		return Result{Error: err.Error()}
 	}
+	scheme, host := u.Scheme, u.Hostname()
 	if err = policy.validate(u); err != nil {
+		logDownload(policy.logger, slog.LevelWarn, scheme, host, 0, 0, false, "url_rejected", 0)
 		return Result{Error: err.Error()}
 	}
 
@@ -101,6 +113,7 @@ func (d *Downloader) Download(ctx context.Context, raw string) Result {
 	case d.semaphore <- struct{}{}:
 		defer func() { <-d.semaphore }()
 	case <-ctx.Done():
+		logDownload(policy.logger, slog.LevelWarn, scheme, host, 0, 0, false, "context_canceled", 0)
 		return Result{Error: ctx.Err().Error()}
 	}
 
@@ -119,18 +132,22 @@ func (d *Downloader) Download(ctx context.Context, raw string) Result {
 	var result Result
 	for n := 1; n <= policy.attempts; n++ {
 		started := time.Now()
-		stored, status, attemptErr, retry := d.once(ctx, &clientCopy, u)
-		attempt := Attempt{Number: n, HTTPStatus: status, DurationMS: time.Since(started).Milliseconds()}
+		stored, status, attemptErr, retry, reason := d.once(ctx, &clientCopy, u)
+		duration := time.Since(started).Milliseconds()
+		attempt := Attempt{Number: n, HTTPStatus: status, DurationMS: duration}
 		if attemptErr == nil {
 			result.Stored = stored
 			result.Attempts = append(result.Attempts, attempt)
 			result.Error = ""
+			logDownload(policy.logger, slog.LevelDebug, scheme, host, n, status, false, "completed", duration)
 			return result
 		}
 		attempt.Error = attemptErr.Error()
 		result.Attempts = append(result.Attempts, attempt)
 		result.Error = attempt.Error
-		if !retry || n == policy.attempts {
+		willRetry := retry && n < policy.attempts
+		logDownload(policy.logger, slog.LevelWarn, scheme, host, n, status, willRetry, reason, duration)
+		if !willRetry {
 			break
 		}
 		timer := time.NewTimer(policy.retryDelay * time.Duration(1<<(n-1)))
@@ -138,6 +155,7 @@ func (d *Downloader) Download(ctx context.Context, raw string) Result {
 		case <-ctx.Done():
 			timer.Stop()
 			result.Error = ctx.Err().Error()
+			logDownload(policy.logger, slog.LevelWarn, scheme, host, n, status, false, "context_canceled", duration)
 			return result
 		case <-timer.C:
 		}
@@ -145,31 +163,55 @@ func (d *Downloader) Download(ctx context.Context, raw string) Result {
 	return result
 }
 
-func (d *Downloader) once(ctx context.Context, client *http.Client, u *url.URL) (Stored, int, error, bool) {
+func (d *Downloader) once(ctx context.Context, client *http.Client, u *url.URL) (Stored, int, error, bool, string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return Stored{}, 0, err, false
+		return Stored{}, 0, err, false, "request_error"
 	}
 	req.Header.Set("Accept", "image/png,image/jpeg,image/webp,image/gif;q=0.9,*/*;q=0.1")
 	resp, err := client.Do(req)
 	if err != nil {
-		return Stored{}, 0, err, true
+		return Stored{}, 0, err, true, "network_error"
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		retry := resp.StatusCode == 408 || resp.StatusCode == 429 || resp.StatusCode >= 500
-		return Stored{}, resp.StatusCode, fmt.Errorf("image server returned %d", resp.StatusCode), retry
+		return Stored{}, resp.StatusCode, fmt.Errorf("image server returned %d", resp.StatusCode), retry, "http_status"
 	}
 	if resp.ContentLength > d.maxBytes {
-		return Stored{}, resp.StatusCode, fmt.Errorf("image exceeds %d bytes", d.maxBytes), false
+		return Stored{}, resp.StatusCode, fmt.Errorf("image exceeds %d bytes", d.maxBytes), false, "response_too_large"
 	}
 	id, err := RandomID()
 	if err != nil {
-		return Stored{}, resp.StatusCode, err, false
+		return Stored{}, resp.StatusCode, err, false, "storage_error"
 	}
 	stored, err := d.storage.Save(id, resp.Header.Get("Content-Type"), resp.Body, d.maxBytes)
-	return stored, resp.StatusCode, err, false
+	if err != nil {
+		return Stored{}, resp.StatusCode, err, false, "storage_error"
+	}
+	return stored, resp.StatusCode, nil, false, "completed"
+}
+
+func logDownload(logger *slog.Logger, level slog.Level, scheme, host string, attempt, status int, retry bool, reason string, durationMS int64) {
+	if logger == nil {
+		return
+	}
+	attributes := []any{
+		"component", "image_download",
+		"target_scheme", scheme,
+		"target_host", host,
+		"attempt", attempt,
+		"retry", retry,
+		"reason", reason,
+	}
+	if status != 0 {
+		attributes = append(attributes, "status", status)
+	}
+	if attempt != 0 {
+		attributes = append(attributes, "duration_ms", durationMS)
+	}
+	logger.Log(context.Background(), level, "image download attempt completed", attributes...)
 }
 
 func RemoveStored(s Stored) error {

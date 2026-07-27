@@ -42,6 +42,7 @@ DATA_PORT=15880
 ADMIN_PORT=15881
 PUBLIC_IMAGE_BASE_URL=http://<EASYTIER_IP>:15880/_gateway/images/
 ADMIN_PASSWORD=<至少12字符的强密码>
+LOG_LEVEL=info
 
 EASYTIER_BIND_IP=0.0.0.0
 LAN_BIND_IP=0.0.0.0
@@ -114,6 +115,23 @@ docker compose -f compose.1panel.yaml ps
 - 健康检查：`http://<HOST_REACHABLE_IP>:<DATA_PORT>/_gateway/health`
 
 首次启动会使用 `.env` 中的 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 创建管理员。已有管理员不会因环境变量变化而自动重置密码。
+
+## 日志与排障
+
+网关以一行一条 JSON 的形式把日志写入 stdout，由 Docker 收集，不会在 `/data` 中创建日志文件。`LOG_LEVEL` 默认是 `info`，此时可以看到 `403` 和其他失败；成功 HTTP 请求、成功上游调用、成功图片下载等详细完成日志只在临时启用 `debug` 时出现。成功的健康检查始终不记录。
+
+```bash
+docker compose logs --follow --tail=200 image-gateway
+```
+
+排查 `403` 时可以结合 `component` 与 `reason` 判断来源：
+
+- `component=allowlist`，`reason=invalid_remote_addr` 或 `not_allowed`：直接 TCP 对端地址无效或未命中白名单；关注 `remote_addr` 和可选的 `peer_ip`。
+- `component=csrf`，`reason=invalid_token`：管理面 CSRF 校验失败。
+- `component=upstream`，`reason=http_status` 且 `status=403`：newapi 上游返回了 `403`。
+- `component=http_request` 且 `status=403`：本次入站请求最终返回了 `403`；结合相邻组件日志继续定位。
+
+日志不记录 `Authorization`、`Cookie`、token、请求/响应 body 或 URL query。外部图片目标只记录 `scheme` 和 `host`，不记录完整 URL。
 
 ## 使用提示
 

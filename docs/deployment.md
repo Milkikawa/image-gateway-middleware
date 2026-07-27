@@ -55,6 +55,7 @@ cp .env.example .env
 | `ADMIN_USERNAME`        | 首次创建的管理员用户名               | `admin`                                  |
 | `ADMIN_PASSWORD`        | 首次创建的管理员密码，至少 12 字符   | 使用强密码                               |
 | `COOKIE_SECURE`         | 管理页面是否只通过 HTTPS 发送 Cookie | HTTP 用 `false`，HTTPS 用 `true`         |
+| `LOG_LEVEL`             | stdout JSON 日志的最低等级           | `info`（默认）                           |
 | `MIN_FREE_BYTES`        | 调用 newapi 前要求的最小可用空间     | 默认 2 GiB                               |
 
 `DATA_PORT` 与 `ADMIN_PORT` 也适用于直接运行程序的场景。修改 `DATA_PORT` 后，必须同步修改 `PUBLIC_IMAGE_BASE_URL`；该地址应以 `/_gateway/images/` 结尾，而且必须能从 Koishi 所在网络访问。
@@ -118,7 +119,7 @@ docker compose config
 docker compose build
 docker compose up -d
 docker compose ps
-docker compose logs --no-color image-gateway
+docker compose logs --follow --tail=200 image-gateway
 ```
 
 1Panel 用户可以改用已经加入外部 `1panel-network` 的专用配置。仓库必须位于 `/opt/image-gateway-middleware`，并先按上一节创建绝对数据目录：
@@ -143,7 +144,40 @@ curl -fsS "http://<HOST_REACHABLE_IP>:${DATA_PORT}/_gateway/health"
 http://<HOST_REACHABLE_IP>:<ADMIN_PORT>/
 ```
 
-首次启动时，数据库中没有管理员才会使用环境变量创建管理员。修改 `.env` 不会重置已有管理员密码。修改任一白名单后需要重启容器。
+首次启动时，数据库中没有管理员才会使用环境变量创建管理员。修改 `.env` 不会重置已有管理员密码。Compose 不会把修改后的 `env_file` 注入已存在的容器，因此修改 `LOG_LEVEL`、白名单等环境变量后应执行 `docker compose up -d --force-recreate image-gateway`；仅执行 `docker compose restart` 不会应用新的环境变量。直接运行二进制时，修改环境变量后重启进程即可。
+
+## 日志与 403 排障
+
+应用把一行一条的 JSON 日志写入 stdout，由 Docker 收集；日志不写入 `/data`，因此也不属于 `database/`、`images/` 数据备份。两份 Compose 都为 `image-gateway` 配置了 Docker `local` 日志驱动：`max-size=10m`、`max-file=3`、`compress=true`。这形成约 30 MiB 的轮转窗口；旧日志压缩后实际磁盘占用可能更低，不应把它视为精确空间上限。
+
+这种配置对 HDD 较友好：日志轮转有界，成功健康检查不写日志，默认 `info` 也会抑制成功请求、成功上游和成功图片下载等高频详细完成事件。默认等级仍会记录 `403` 和失败事件；仅在排障期间临时设置 `LOG_LEVEL=debug`。
+
+查看最近日志或持续跟踪：
+
+```bash
+docker compose logs --tail=200 image-gateway
+docker compose logs --follow --tail=200 image-gateway
+```
+
+日志本身是 JSON，无需安装 `jq`；可以直接阅读，或按稳定字段过滤：
+
+```bash
+docker compose logs --no-color --tail=200 image-gateway \
+  | grep '"component":"allowlist"'
+docker compose logs --no-color --tail=200 image-gateway \
+  | grep -E '"component":"(upstream|csrf|http_request)"'
+```
+
+排查当前请求的 `403` 时按以下顺序判断：
+
+1. 优先查 `component=allowlist`。`reason=invalid_remote_addr` 表示直接 TCP 对端地址无法解析；`reason=not_allowed` 表示对端未命中白名单。比较日志中的 `remote_addr`、可选的 `peer_ip` 与对应的 `DATA_ALLOWED_CLIENTS` 或 `ADMIN_ALLOWED_CLIENTS`。
+2. 若出现 `component=upstream`、`reason=http_status`、`status=403`，说明 `403` 来自 newapi 上游。
+3. 若出现 `component=csrf`、`reason=invalid_token`，说明管理面 POST 的 CSRF token 校验失败。
+4. `component=http_request`、`status=403` 是入站请求的最终结果，应与同一时段的上述组件事件结合判断。
+
+日志不记录 `Authorization`、`Cookie`、token、请求/响应 body 或 URL query；图片下载只记录目标 `scheme`、`host`，不记录完整 URL。
+
+修改 Compose 的 `logging` 配置必须 recreate 容器才能生效；可以使用 `docker compose up -d --force-recreate image-gateway`。这会替换容器但不会删除挂载在 `/data` 的业务数据。由 1Panel 管理时，应在 1Panel 中重新创建服务，以保留其项目管理方式。
 
 ## mihomo、Fake-IP 与 Docker bridge 验收
 

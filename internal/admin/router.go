@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ type Server struct {
 	dataDir    string
 	templates  *template.Template
 	onRuntime  func(config.Runtime)
+	logger     *slog.Logger
 }
 type pageData struct {
 	Title        string
@@ -60,6 +62,10 @@ func NewServer(db *sql.DB, auth *Auth, downloader *image.Downloader, base *url.U
 	}
 	return s
 }
+
+// SetLogger enables structured diagnostics. A nil logger disables them.
+func (s *Server) SetLogger(logger *slog.Logger) { s.logger = logger }
+
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serve) }
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: http: https:; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
@@ -75,6 +81,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && !s.auth.ValidCSRF(r) {
+		if s.logger != nil {
+			s.logger.Warn("admin CSRF validation failed",
+				"component", "csrf",
+				"plane", "admin",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+				"reason", "invalid_token",
+			)
+		}
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 		return
 	}
