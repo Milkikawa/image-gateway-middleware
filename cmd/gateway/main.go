@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	"image-gateway-middleware/internal/config"
 	"image-gateway-middleware/internal/httpdata"
 	"image-gateway-middleware/internal/image"
+	"image-gateway-middleware/internal/observability"
 	"image-gateway-middleware/internal/persistence"
 	"image-gateway-middleware/internal/processor"
 	"image-gateway-middleware/internal/storage"
@@ -22,7 +22,12 @@ import (
 )
 
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	level, err := observability.ParseLevel(os.Getenv("LOG_LEVEL"))
+	log := observability.NewLogger(os.Stdout, level)
+	if err != nil {
+		log.Error("logging configuration error", "error", err)
+		os.Exit(1)
+	}
 	cfg, err := config.LoadBootstrap()
 	if err != nil {
 		log.Error("configuration error", "error", err)
@@ -48,6 +53,7 @@ func main() {
 	}
 	upstreamClient := upstream.New(cfg.NewAPIBaseURL, cfg.UpstreamTimeout)
 	downloader := image.NewDownloader(image.Storage{Images: layout.Images, Temp: layout.Temp}, cfg.ImageTimeout, runtimeCfg.DownloadAttempts, runtimeCfg.RetryBaseDelay, cfg.MaxImageBytes, cfg.DownloadWorkers, runtimeCfg.MaxRedirects)
+	downloader.SetLogger(log)
 	imageProcessor := processor.New(downloader, audit.New(store.DB), cfg.PublicImageBase, store.DB)
 	proxy := httpdata.NewProxy(upstreamClient, cfg.MaxJSONBodyBytes, cfg.MaxResponseBytes, imageProcessor, func(ctx context.Context) error {
 		if err := store.DB.PingContext(ctx); err != nil {
@@ -55,21 +61,26 @@ func main() {
 		}
 		return imageProcessor.Preflight(ctx, cfg.MinFreeBytes, cfg.DataDir)
 	})
-	dataHandler := access.AllowClients(
+	proxy.SetLogger(log)
+	dataHandler := observability.LogHTTPRequests(access.AllowClients(
 		httpdata.NewRouter(proxy, http.HandlerFunc(imageProcessor.ServeImage), httpdata.Health(store.DB)),
 		cfg.DataAllowedClients,
-	)
+		access.WithAllowlistLogger(log, "data"),
+	), log, "data")
 	auth := admin.NewAuth(store.DB, cfg.CookieSecure)
 	if err = auth.EnsureAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
 		log.Error("initialize administrator", "error", err)
 		os.Exit(1)
 	}
-	adminHandler := access.AllowClients(
-		admin.NewServer(store.DB, auth, downloader, cfg.PublicImageBase, cfg.DataDir, func(runtime config.Runtime) {
-			downloader.UpdatePolicy(runtime.DownloadAttempts, runtime.RetryBaseDelay, runtime.MaxRedirects)
-		}).Handler(),
+	adminServer := admin.NewServer(store.DB, auth, downloader, cfg.PublicImageBase, cfg.DataDir, func(runtime config.Runtime) {
+		downloader.UpdatePolicy(runtime.DownloadAttempts, runtime.RetryBaseDelay, runtime.MaxRedirects)
+	})
+	adminServer.SetLogger(log)
+	adminHandler := observability.LogHTTPRequests(access.AllowClients(
+		adminServer.Handler(),
 		cfg.AdminAllowedClients,
-	)
+		access.WithAllowlistLogger(log, "admin"),
+	), log, "admin")
 	a := app.App{Config: cfg, Runtime: runtimeCfg, Store: store, Layout: layout, DataHandler: dataHandler, AdminHandler: adminHandler, Log: log}
 	if err = a.Run(ctx); err != nil {
 		log.Error("gateway stopped", "error", err)

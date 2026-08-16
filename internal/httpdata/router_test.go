@@ -3,6 +3,7 @@ package httpdata
 import (
 	"bytes"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"image-gateway-middleware/internal/observability"
 	"image-gateway-middleware/internal/upstream"
 )
 
@@ -97,5 +99,38 @@ func TestMultipartBodyIsByteIdenticalAndAudited(t *testing.T) {
 	r := <-results
 	if r.Audit.Model != "gpt-image-2" || len(r.Audit.Files) != 1 || r.Audit.Files[0].Size != 6 {
 		t.Fatalf("audit=%+v", r.Audit)
+	}
+}
+
+func TestUpstream403LogsStatusWithoutSecrets(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden response secret", http.StatusForbidden)
+	}))
+	defer server.Close()
+	base, _ := url.Parse(server.URL)
+	var output bytes.Buffer
+	results := make(chan ImageResult, 1)
+	p := NewProxy(upstream.New(base, time.Second), 1024, 4096, captureProcessor{results})
+	p.SetLogger(observability.NewLogger(&output, slog.LevelInfo))
+	router := NewRouter(p, http.NotFoundHandler(), http.NotFoundHandler())
+
+	models := httptest.NewRequest(http.MethodGet, "/v1/models?token=query-secret", nil)
+	models.Header.Set("Authorization", "Bearer authorization-secret")
+	router.ServeHTTP(httptest.NewRecorder(), models)
+	imageRequest := httptest.NewRequest(http.MethodPost, "/v1/images/generations?token=query-secret", strings.NewReader(`{"prompt":"body-secret"}`))
+	imageRequest.Header.Set("Authorization", "Bearer authorization-secret")
+	router.ServeHTTP(httptest.NewRecorder(), imageRequest)
+	<-results
+
+	logged := output.String()
+	for _, expected := range []string{`"component":"upstream"`, `"status":403`, `"reason":"http_status"`, `"path":"/v1/models"`, `"path":"/v1/images/generations"`} {
+		if !strings.Contains(logged, expected) {
+			t.Errorf("log missing %s: %s", expected, logged)
+		}
+	}
+	for _, secret := range []string{"query-secret", "authorization-secret", "body-secret", "forbidden response secret"} {
+		if strings.Contains(logged, secret) {
+			t.Errorf("log leaked %q: %s", secret, logged)
+		}
 	}
 }

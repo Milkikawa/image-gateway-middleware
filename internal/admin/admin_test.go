@@ -1,8 +1,10 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"html/template"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 
 	"image-gateway-middleware/internal/config"
 	"image-gateway-middleware/internal/image"
+	"image-gateway-middleware/internal/observability"
 	"image-gateway-middleware/internal/persistence"
 )
 
@@ -56,8 +59,11 @@ func TestAuthenticationAndCSRF(t *testing.T) {
 	if ok.Code != 200 {
 		t.Fatalf("dashboard=%d", ok.Code)
 	}
-	post := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader("download_attempts=3&retry_base_delay=1s&max_redirects=3"))
+	var logOutput bytes.Buffer
+	server.SetLogger(observability.NewLogger(&logOutput, slog.LevelInfo))
+	post := httptest.NewRequest(http.MethodPost, "/settings?query=query-secret", strings.NewReader("download_attempts=3&retry_base_delay=1s&max_redirects=3&csrf=form-secret"))
 	post.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	post.Header.Set("Authorization", "Bearer authorization-secret")
 	for _, c := range cookies {
 		post.AddCookie(c)
 	}
@@ -65,6 +71,22 @@ func TestAuthenticationAndCSRF(t *testing.T) {
 	h.ServeHTTP(forbidden, post)
 	if forbidden.Code != 403 {
 		t.Fatalf("csrf=%d", forbidden.Code)
+	}
+	logged := logOutput.String()
+	for _, expected := range []string{`"component":"csrf"`, `"plane":"admin"`, `"reason":"invalid_token"`, `"path":"/settings"`} {
+		if !strings.Contains(logged, expected) {
+			t.Errorf("log missing %s: %s", expected, logged)
+		}
+	}
+	for _, secret := range []string{"form-secret", "query-secret", "authorization-secret", "correct-password"} {
+		if strings.Contains(logged, secret) {
+			t.Errorf("log leaked %q: %s", secret, logged)
+		}
+	}
+	for _, cookie := range cookies {
+		if strings.Contains(logged, cookie.Value) {
+			t.Errorf("log leaked cookie value: %s", logged)
+		}
 	}
 	if ok.Header().Get("Content-Security-Policy") == "" || ok.Header().Get("X-Frame-Options") != "DENY" {
 		t.Fatal("security headers missing")

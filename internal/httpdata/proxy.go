@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"time"
@@ -27,6 +28,7 @@ type Proxy struct {
 	maxJSON, maxResponse int64
 	processor            ImageProcessor
 	preflight            func(context.Context) error
+	logger               *slog.Logger
 }
 
 func NewProxy(client *upstream.Client, maxJSON, maxResponse int64, processor ImageProcessor, preflight ...func(context.Context) error) *Proxy {
@@ -36,18 +38,26 @@ func NewProxy(client *upstream.Client, maxJSON, maxResponse int64, processor Ima
 	}
 	return p
 }
+
+// SetLogger enables structured upstream diagnostics. A nil logger disables them.
+func (p *Proxy) SetLogger(logger *slog.Logger) { p.logger = logger }
+
 func (p *Proxy) Models(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	resp, err := p.client.Do(r.Context(), r, nil)
 	if err != nil {
+		p.logUpstream(r, started, 0, "network_error")
 		writeError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
 		return
 	}
 	defer resp.Body.Close()
 	raw, err := readLimited(resp.Body, p.maxResponse)
 	if err != nil {
+		p.logUpstream(r, started, resp.StatusCode, "response_unavailable")
 		writeError(w, http.StatusBadGateway, "upstream_response_error", "upstream response is unavailable")
 		return
 	}
+	p.logUpstream(r, started, resp.StatusCode, upstreamReason(resp.StatusCode))
 	upstream.CopyResponseHeaders(w.Header(), resp.Header)
 	removeBodyIntegrityHeaders(w.Header())
 	w.WriteHeader(resp.StatusCode)
@@ -90,6 +100,7 @@ func (p *Proxy) Image(w http.ResponseWriter, r *http.Request, isEdit bool) {
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	upstreamStarted := time.Now()
 	resp, err := p.client.Do(ctx, r, body)
 	if isEdit {
 		select {
@@ -100,16 +111,50 @@ func (p *Proxy) Image(w http.ResponseWriter, r *http.Request, isEdit bool) {
 		}
 	}
 	if err != nil {
+		p.logUpstream(r, upstreamStarted, 0, "network_error")
 		writeError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
 		return
 	}
 	defer resp.Body.Close()
 	raw, err := readLimited(resp.Body, p.maxResponse)
 	if err != nil {
+		p.logUpstream(r, upstreamStarted, resp.StatusCode, "response_unavailable")
 		writeError(w, http.StatusBadGateway, "upstream_response_error", "upstream response is unavailable")
 		return
 	}
+	p.logUpstream(r, upstreamStarted, resp.StatusCode, upstreamReason(resp.StatusCode))
 	p.processor.Process(w, r, ImageResult{Audit: audit, RawResponse: raw, Response: resp, Started: started})
+}
+
+func upstreamReason(status int) string {
+	if status >= http.StatusBadRequest {
+		return "http_status"
+	}
+	return "completed"
+}
+
+func (p *Proxy) logUpstream(r *http.Request, started time.Time, status int, reason string) {
+	if p.logger == nil {
+		return
+	}
+	attributes := []any{
+		"component", "upstream",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"reason", reason,
+	}
+	if status != 0 {
+		attributes = append(attributes, "status", status)
+	}
+	switch {
+	case reason == "network_error" || reason == "response_unavailable" || status >= http.StatusInternalServerError:
+		p.logger.Warn("upstream request completed", attributes...)
+	case status >= http.StatusBadRequest:
+		p.logger.Info("upstream request completed", attributes...)
+	default:
+		p.logger.Debug("upstream request completed", attributes...)
+	}
 }
 func readLimited(r io.Reader, max int64) ([]byte, error) {
 	raw, err := io.ReadAll(io.LimitReader(r, max+1))
